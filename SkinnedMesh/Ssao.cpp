@@ -260,7 +260,7 @@ void Ssao::ComputeSsao(
     cmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(mAmbientMap0.Get(),
         D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_GENERIC_READ));
 
-    BlurAmbientMap(cmdList, currFrame, blurCount);
+   BlurAmbientMap(cmdList, currFrame, blurCount);
 }
  
 void Ssao::BlurAmbientMap(ID3D12GraphicsCommandList* cmdList, FrameResource* currFrame, int blurCount)

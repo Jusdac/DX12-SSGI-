@@ -1,7 +1,3 @@
-//=============================================================================
-// Ssao.hlsl by Frank Luna (C) 2015 All Rights Reserved.
-// 修复：移除递归，用循环实现2次反射（解决崩溃问题）
-//=============================================================================
 
 cbuffer cbSsao : register(b0)
 {
@@ -34,21 +30,20 @@ SamplerState gsamLinearClamp : register(s1);
 SamplerState gsamDepthMap : register(s2);
 SamplerState gsamLinearWrap : register(s3);
 
+// 核心常量（集中管理）
 static const int gSampleCount = 14;
-static const int gMaxRaySteps = 6;
-static const float gRayHitThreshold = 0.02f;
-static const int gMaxReflectCount = 2; // 最多2次反射
-static const float gReflectAtten = 0.5f; // 反射能量衰减
-static const float gReflectDistScale = 0.8f; // 反射距离缩放（避免越界）
+static const int gMaxRaySteps = 12;
+static const float gRayHitThreshold = 0.6f;
+static const int gMaxReflectCount = 2;
+static const float gReflectAtten = 0.9f;
+static const float gReflectDistScale = 0.9f;
+static const float gMinThreshold = 0.0001f;
+static const float3 gMinAlbedo = float3(0.1f, 0.1f, 0.1f);
  
 static const float2 gTexCoords[6] =
 {
-    float2(0.0f, 1.0f),
-    float2(0.0f, 0.0f),
-    float2(1.0f, 0.0f),
-    float2(0.0f, 1.0f),
-    float2(1.0f, 0.0f),
-    float2(1.0f, 1.0f)
+    float2(0.0f, 1.0f), float2(0.0f, 0.0f), float2(1.0f, 0.0f),
+    float2(0.0f, 1.0f), float2(1.0f, 0.0f), float2(1.0f, 1.0f)
 };
  
 struct VertexOut
@@ -68,193 +63,218 @@ VertexOut VS(uint vid : SV_VertexID)
     return vout;
 }
 
+// 遮挡计算（精简版）
 float OcclusionFunction(float distZ)
 {
-    float occlusion = 0.0f;
-    if (distZ > gSurfaceEpsilon)
-    {
-        float fadeLength = gOcclusionFadeEnd - gOcclusionFadeStart;
-        occlusion = saturate((gOcclusionFadeEnd - distZ) / fadeLength);
-    }
-    return occlusion;
+    if (distZ <= gSurfaceEpsilon)
+        return 0.0f;
+    float fadeLen = max(gOcclusionFadeEnd - gOcclusionFadeStart, gMinThreshold);
+    return saturate((gOcclusionFadeEnd - distZ) / fadeLen);
 }
 
+// NDC转视图深度（安全除法）
 float NdcDepthToViewDepth(float z_ndc)
 {
     float denom = z_ndc - gProj[2][2];
-    denom = max(abs(denom), 0.0001f) * sign(denom);
-    float viewZ = gProj[3][2] / denom;
-    return viewZ;
+    denom = (abs(denom) < gMinThreshold) ? gMinThreshold * sign(denom) : denom;
+    return gProj[3][2] / denom;
 }
 
-// 【修复1：移除递归，改为单次步进函数（无嵌套调用）】
+// 单次射线检测（精简逻辑）
 bool SingleRayStep(
-    float3 rayStart,
-    float3 rayDir,
-    float maxDist,
-    out float3 hitPos,
-    out float2 hitTexC,
-    out float3 hitNormal // 新增：输出命中点法线（用于二次反射）
+    float3 rayStart, float3 rayDir, float maxDist,
+    out float3 hitPos, out float2 hitTexC, out float3 hitNormal
 )
 {
-    hitPos = float3(0.0f, 0.0f, 0.0f);
-    hitTexC = float2(0.0f, 0.0f);
-    hitNormal = float3(0.0f, 1.0f, 0.0f); // 默认法线
+    hitPos = float3(0, 0, 0);
+    hitTexC = float2(0, 0);
+    hitNormal = float3(0, 1, 0);
+    if (maxDist < gMinThreshold || length(rayDir) < gMinThreshold)
+        return false;
 
-    float stepSize = maxDist / (float) gMaxRaySteps;
+    float stepSize = maxDist / gMaxRaySteps;
     float3 currPos = rayStart;
+    float3 rayDirNorm = normalize(rayDir);
+    // 射线起点抬离表面
+    float bias = 0.02f; // 偏移量
+    currPos = rayStart + rayDirNorm * bias; // 起点沿射线方向偏移，跳过自身
 
     for (int step = 0; step < gMaxRaySteps; step++)
     {
-        currPos += rayDir * stepSize;
-        if (length(currPos - rayStart) > maxDist)
+        currPos += rayDirNorm * stepSize;
+        if (distance(currPos, rayStart) > maxDist)
             break;
 
         float4 projCurr = mul(float4(currPos, 1.0f), gProjTex);
-        projCurr /= projCurr.w;
-        projCurr.xy = saturate(projCurr.xy); // 强制限制在屏幕内
+        projCurr.xyz /= projCurr.w;
+        projCurr.xy = saturate(projCurr.xy);
 
-        float z_ndc = gDepthMap.SampleLevel(gsamDepthMap, projCurr.xy, 0.0f).r;
-        float sceneZ = NdcDepthToViewDepth(z_ndc);
-
-        if (abs(currPos.z) < 0.0001f)
+        float sceneZ = NdcDepthToViewDepth(gDepthMap.SampleLevel(gsamDepthMap, projCurr.xy, 0.0f).r);
+        if (abs(currPos.z) < gMinThreshold)
             continue;
 
-        float3 scenePos = (sceneZ / currPos.z) * currPos;
-
-        if (length(currPos - scenePos) < gRayHitThreshold)
+        float3 scenePos = currPos * (sceneZ / currPos.z);
+        if (distance(currPos, scenePos) < gRayHitThreshold && sceneZ < rayStart.z)
         {
             hitPos = scenePos;
             hitTexC = projCurr.xy;
             hitNormal = normalize(gNormalMap.SampleLevel(gsamPointClamp, hitTexC, 0.0f).xyz);
+            hitNormal.z = -hitNormal.z; // 法线Z轴修正
             return true;
         }
     }
     return false;
 }
 
-// 【修复2：用循环实现多次反射（替代递归）】
+// 多反射计算（精简循环）
 float3 MultiReflectLight(
-    float3 startPos,
-    float3 startDir,
-    float maxDist
+    float3 startPos, float3 startDir, float maxDist,
+    out bool firstHit, out float3 firstHitPos, out float2 firstHitTexC, out float3 firstHitNormal
 )
 {
-    float3 totalLight = float3(0.0f, 0.0f, 0.0f);
-    float3 currPos = startPos;
-    float3 currDir = startDir;
-    float currDist = maxDist;
-    float atten = 1.0f; // 能量衰减累计
+    // 初始化输出参数（默认未命中）
+    firstHit = false;
+    firstHitPos = float3(0, 0, 0);
+    firstHitTexC = float2(0, 0);
+    firstHitNormal = float3(0, 1, 0);
 
-    // 循环实现最多2次反射（无递归）
+    float3 totalLight = float3(0, 0, 0);
+    float3 currPos = startPos;
+    float3 currDir = normalize(startDir);
+    float currDist = maxDist;
+    float atten = 1.0f;
+
+    // 循环实现多次反射
     for (int reflectIdx = 0; reflectIdx < gMaxReflectCount; reflectIdx++)
     {
         float3 hitPos;
         float2 hitTexC;
         float3 hitNormal;
 
-        if (SingleRayStep(currPos, currDir, currDist, hitPos, hitTexC, hitNormal))
+        // 仅执行一次射线检测（复用给SSAO）
+        bool hit = SingleRayStep(currPos, currDir, currDist, hitPos, hitTexC, hitNormal);
+        
+        // 首次反射的结果，输出给SSAO使用
+        if (reflectIdx == 0)
         {
-            // 采样当前反射的颜色，并叠加衰减
-            float4 albedo = gAlbedoMap.SampleLevel(gsamPointClamp, hitTexC, 0.0f);
-            float dist = length(hitPos - currPos);
-            float distAtten = pow(1.0f - saturate(dist / currDist), 2.0f);
-            totalLight += albedo.rgb * distAtten * atten;
+            firstHit = hit;
+            firstHitPos = hitPos;
+            firstHitTexC = hitTexC;
+            firstHitNormal = hitNormal;
+        }
 
-            // 更新下一次反射的参数
-            currPos = hitPos;
-            currDir = reflect(currDir, hitNormal); // 计算下一次反射方向
-            currDist = maxDist * gReflectDistScale; // 缩小下一次反射距离
-            atten *= gReflectAtten; // 衰减能量
-        }
-        else
-        {
+        if (!hit)
             break; // 未命中则终止反射
-        }
+
+        // 采样反照率 + 距离衰减
+        float3 albedo = max(gAlbedoMap.SampleLevel(gsamPointClamp, hitTexC, 0.0f).rgb, gMinAlbedo);
+        
+        float distAtten = pow(1.0f - saturate(distance(hitPos, currPos) / currDist), 1.0f) * 3.0f;
+        totalLight += albedo * distAtten * atten;
+
+        // 更新反射参数
+        currPos = hitPos;
+        currDir = reflect(currDir, hitNormal);
+        currDist *= gReflectDistScale;
+        atten *= gReflectAtten;
     }
     return totalLight;
 }
  
+
 float4 PS(VertexOut pin) : SV_Target
 {
-    float3 n = gNormalMap.SampleLevel(gsamPointClamp, pin.TexC, 0.0f).xyz;
-    float pz = gDepthMap.SampleLevel(gsamDepthMap, pin.TexC, 0.0f).r;
-    pz = NdcDepthToViewDepth(pz);
+    // 1. 基础数据采样 & 有效性判断
+    float2 texC = pin.TexC;
+    float3 normal = normalize(gNormalMap.SampleLevel(gsamPointClamp, texC, 0.0f).xyz);
+    float viewZ = NdcDepthToViewDepth(gDepthMap.SampleLevel(gsamDepthMap, texC, 0.0f).r);
 
-    if (abs(pin.PosV.z) < 0.0001f)
+    if (abs(pin.PosV.z) < gMinThreshold || abs(viewZ) < gMinThreshold)
         return float4(0.05f, 0.05f, 0.05f, 1.0f);
 
-    float3 p = (pz / pin.PosV.z) * pin.PosV;
-    float3 randVec = 2.0f * gRandomVecMap.SampleLevel(gsamLinearWrap, 4.0f * pin.TexC, 0.0f).rgb - 1.0f;
+    float3 posV = (viewZ / pin.PosV.z) * pin.PosV;
+    float3 randVec = 2.0f * gRandomVecMap.SampleLevel(gsamLinearWrap, 4.0f * texC, 0.0f).rgb - 1.0f;
 
+    // 2. 初始化累计变量
     float occlusionSum = 0.0f;
-    float3 indirectLightSum = float3(0.0f, 0.0f, 0.0f);
+    float3 indirectLightSum = float3(0, 0, 0);
     int validSampleCount = 0;
 
+    // 3. 采样循环（核心逻辑：无分支 + 少变量）
     for (int i = 0; i < gSampleCount; ++i)
     {
+      // 1. 计算射线方向
         float3 offset = reflect(gOffsetVectors[i].xyz, randVec);
-        float flip = sign(dot(offset, n));
+        float flip = sign(dot(offset, normal));
         float3 rayDir = normalize(flip * offset);
-
-        // 【修复3：调用循环实现的多次反射函数（无递归）】
-        float3 hitIndirectLight = MultiReflectLight(p, rayDir, gOcclusionRadius);
-
-        // 首次命中的遮挡计算（沿用原始逻辑）
-        float3 hitPos;
+        //防止ray和法线重合
+        rayDir = normalize(rayDir + 0.1f * normal); // 偏向法线方向，避免向内
+        float cosAngle = dot(rayDir, normal);
+        if (cosAngle < 0.17f) // cos(80°)≈0.17，小于10度则舍弃
+            continue;
+        
+    // 2. 仅调用一次：同时拿到「首次命中（SSAO）」和「反射光（SSGI）」
+        float3 hitLight;
+        bool isHit;
+        float3 hitPos, hitNormal;
         float2 hitTexC;
-        float3 hitNormal;
-        bool isHit = SingleRayStep(p, rayDir, gOcclusionRadius, hitPos, hitTexC, hitNormal);
+        hitLight = MultiReflectLight(
+        posV, rayDir, gOcclusionRadius,
+        isHit, hitPos, hitTexC, hitNormal );
 
-        if (isHit)
+        // 3.3 预计算：未命中分支的基础数据（作为默认值）
+        float3 q = posV + flip * gOcclusionRadius * offset;
+        float4 projQ = mul(float4(q, 1.0f), gProjTex);
+        projQ.xyz /= projQ.w;
+        projQ.xy = saturate(projQ.xy);
+
+        float rz = NdcDepthToViewDepth(gDepthMap.SampleLevel(gsamDepthMap, projQ.xy, 0.0f).r);
+        float nonHitValid = step(gMinThreshold, abs(q.z)); // 未命中有效标志（0/1）
+
+        // 3.4 定义核心变量（默认=未命中值，命中时覆盖）
+        float3 samplePos = q * (rz / q.z);
+        float distZ = posV.z - rz;
+        float dp = max(dot(normal, normalize(samplePos - posV)), 0.0f);
+        float2 sampleTexC = projQ.xy;
+
+        // 3.5 未命中时的间接光（默认值）
+        float spatialDist = distance(samplePos, posV);
+        float distAtten = pow(1.0f - saturate(spatialDist / gOcclusionRadius), 0.8f);
+        hitLight = gAlbedoMap.SampleLevel(gsamPointClamp, sampleTexC, 0.0f).rgb * distAtten;
+
+        // 3.6 命中时覆盖核心变量（单掩码+批量赋值，减少重复计算）
+        float hitMask = isHit ? 1.0f : 0.0f;
+        if (isHit) 
         {
-            float distZ = p.z - hitPos.z;
-            float dp = max(dot(n, normalize(hitPos - p)), 0.0f);
-            occlusionSum += dp * OcclusionFunction(distZ);
-
-            if (distZ > -0.1f && dp > 0.01f)
-            {
-                indirectLightSum += hitIndirectLight;
-                validSampleCount++;
-            }
+            samplePos = hitPos;
+            distZ = posV.z - hitPos.z;
+            dp = max(dot(normal, normalize(hitPos - posV)), 0.0f);
+            sampleTexC = hitTexC;
         }
-        else
-        {
-            // 未命中时沿用原始逻辑
-            float3 q = p + flip * gOcclusionRadius * offset;
-            float4 projQ = mul(float4(q, 1.0f), gProjTex);
-            projQ /= projQ.w;
-            projQ.xy = saturate(projQ.xy);
 
-            float rz = gDepthMap.SampleLevel(gsamDepthMap, projQ.xy, 0.0f).r;
-            rz = NdcDepthToViewDepth(rz);
+        // 3.7 有效性过滤（替代continue + 无效样本置0）
+        float validMask = (isHit ? 1.0f : nonHitValid);
+        distZ *= validMask;
+        dp *= validMask;
+        hitLight *= validMask;
 
-            if (abs(q.z) < 0.0001f)
-                continue;
-
-            float3 r = (rz / q.z) * q;
-            float distZ = p.z - r.z;
-            float dp = max(dot(n, normalize(r - p)), 0.0f);
-            occlusionSum += dp * OcclusionFunction(distZ);
-
-            if (distZ > -0.1f && dp > 0.01f)
-            {
-                float4 rAlbedo = gAlbedoMap.SampleLevel(gsamPointClamp, projQ.xy, 0.0f);
-                float spatialDistance = length(r - p);
-                float distanceAtten = pow(1.0f - saturate(spatialDistance / gOcclusionRadius), 2.0f);
-                
-                indirectLightSum += rAlbedo.rgb * distanceAtten;
-                validSampleCount++;
-            }
-        }
+        // 3.8 累计结果
+        occlusionSum += dp * OcclusionFunction(distZ);
+        float indirectValid = step(-0.1f, distZ) * step(0.01f, dp);
+        // 过滤近距离采样 距离<0.05视为自身
+        float minSampleDist = step(0.05f, distance(samplePos, posV));
+        indirectValid *= minSampleDist;
+        indirectLightSum += hitLight * indirectValid*2.0f;
+        validSampleCount += int(indirectValid * validMask);
     }
 
-    occlusionSum = validSampleCount > 0 ? occlusionSum / validSampleCount : 0.0f;
-    indirectLightSum = validSampleCount > 0 ? indirectLightSum / validSampleCount : float3(0.0f, 0.0f, 0.0f);
+    // 4. 归一化 + 最终结果计算
+    float validFactor = validSampleCount > 0 ? 1.0f / validSampleCount : 0.0f;
+    occlusionSum *= validFactor;
+    indirectLightSum *= validFactor;
 
-    float access = 1.0f - occlusionSum;
-    float occlusion = saturate(pow(access, 2.0f));
-    float3 ssgiColor = saturate(indirectLightSum + float3(0.05f, 0.05f, 0.05f));
-	
+    float occlusion = saturate(pow(1.0f - occlusionSum, 2.0f));
+    float3 ssgiColor = saturate(indirectLightSum + float3(0.15f, 0.15f, 0.15f));
+
     return float4(ssgiColor, occlusion);
 }

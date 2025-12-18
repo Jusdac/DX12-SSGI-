@@ -1,0 +1,29 @@
+# 忽略Visual Studio的用户配置文件
+*.vcxproj.user
+
+# 忽略VS的本地缓存目录（包含所有.ipch大文件）
+SkinnedMesh/vs/
+
+# 编译产物目录
+x64/
+Debug/
+Release/
+
+# 其他VS临时文件
+*.suo
+*.sdf
+*.ipch
+*.tlog
+*.lastbuildstate
+*.idb
+*.pdb
+*.obj
+*.exe
+*.ilk
+*.lib
+*.dll
+*.exp
+
+# 系统文件
+.DS_Store
+Thumbs.db

@@ -89,6 +89,7 @@ enum class RenderLayer : int
 	Opaque = 0,
     SkinnedOpaque,
     Debug,
+    SSAO_debug,
 	Sky,
     Icon,
 	Count
@@ -489,6 +490,9 @@ void SkinnedMeshApp::Draw(const GameTimer& gt)
     mCommandList->SetPipelineState(mPSOs["debug"].Get());
     DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::Debug]);
 
+    mCommandList->SetPipelineState(mPSOs["SSAO_debug"].Get());
+    DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::SSAO_debug]);
+
     mCommandList->SetPipelineState(mPSOs["icon"].Get());
     DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::Icon]);
 
@@ -828,14 +832,14 @@ void SkinnedMeshApp::LoadTextures()
 	
 	std::vector<std::wstring> texFilenames = 
 	{
-		L"../../Textures/bricks2.dds",
-		L"../../Textures/bricks2_nmap.dds",
-		L"../../Textures/tile.dds",
-		L"../../Textures/tile_nmap.dds",
-		L"../../Textures/white1x1.dds",
-		L"../../Textures/default_nmap.dds",
-		L"../../Textures/desertcube1024.dds",
-        L"../../Textures/WireFence.dds"
+		L"Textures/bricks2.dds",
+		L"Textures/bricks2_nmap.dds",
+		L"Textures/tile.dds",
+		L"Textures/tile_nmap.dds",
+		L"Textures/white1x1.dds",
+		L"Textures/default_nmap.dds",
+		L"Textures/desertcube1024.dds",
+        L"Textures/WireFence.dds"
 	};
 
     // Add skinned model textures to list so we can reference by name later.
@@ -844,8 +848,8 @@ void SkinnedMeshApp::LoadTextures()
         std::string diffuseName = mSkinnedMats[i].DiffuseMapName;
         std::string normalName = mSkinnedMats[i].NormalMapName;
 
-        std::wstring diffuseFilename = L"../../Textures/" + AnsiToWString(diffuseName);
-        std::wstring normalFilename = L"../../Textures/" + AnsiToWString(normalName);
+        std::wstring diffuseFilename = L"Textures/" + AnsiToWString(diffuseName);
+        std::wstring normalFilename = L"Textures/" + AnsiToWString(normalName);
 
         // strip off extension
         diffuseName = diffuseName.substr(0, diffuseName.find_last_of("."));
@@ -1113,7 +1117,11 @@ void SkinnedMeshApp::BuildShadersAndInputLayout()
         "SKINNED", "1",
         NULL, NULL
     };
-
+    const D3D_SHADER_MACRO ssaoDefines[] =
+    {
+        "SSAO_ON", "1",
+        NULL, NULL
+    };
 	mShaders["standardVS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", nullptr, "VS", "vs_5_1");
     mShaders["skinnedVS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", skinnedDefines, "VS", "vs_5_1");
 	mShaders["opaquePS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", nullptr, "PS", "ps_5_1");
@@ -1125,6 +1133,7 @@ void SkinnedMeshApp::BuildShadersAndInputLayout()
 	
     mShaders["debugVS"] = d3dUtil::CompileShader(L"Shaders\\ShadowDebug.hlsl", nullptr, "VS", "vs_5_1");
     mShaders["debugPS"] = d3dUtil::CompileShader(L"Shaders\\ShadowDebug.hlsl", nullptr, "PS", "ps_5_1");
+    mShaders["debug_SSAO_PS"] = d3dUtil::CompileShader(L"Shaders\\ShadowDebug.hlsl", ssaoDefines, "PS", "ps_5_1");
 
     mShaders["iconVS"] = d3dUtil::CompileShader(L"Shaders\\Icon.hlsl", nullptr, "VS", "vs_5_1");
     mShaders["iconPS"] = d3dUtil::CompileShader(L"Shaders\\Icon.hlsl", nullptr, "PS", "ps_5_1");
@@ -1168,13 +1177,14 @@ void SkinnedMeshApp::BuildShadersAndInputLayout()
 void SkinnedMeshApp::BuildShapeGeometry()
 {
     GeometryGenerator geoGen;
-	GeometryGenerator::MeshData box = geoGen.CreateBox(1.0f, 1.0f, 1.0f, 3);
+	GeometryGenerator::MeshData box = geoGen.CreateSphere(0.5f, 20, 20);
 	GeometryGenerator::MeshData grid = geoGen.CreateGrid(20.0f, 30.0f, 60, 40);
 	GeometryGenerator::MeshData sphere = geoGen.CreateSphere(0.5f, 20, 20);
 	GeometryGenerator::MeshData cylinder = geoGen.CreateCylinder(0.5f, 0.3f, 3.0f, 20, 20);
     GeometryGenerator::MeshData quad = geoGen.CreateQuad(0.0f, 0.0f, 1.0f, 1.0f, 0.0f);
-    
- 
+    GeometryGenerator::MeshData debug_SSAO = geoGen.CreateQuad(0.5f, -0.5f, 0.5f, 0.5f, 0.0f);
+    GeometryGenerator::MeshData debug_SSGI = geoGen.CreateQuad(0.5f, 0.0f, 0.5f, 0.5f, 0.0f);
+
 	//
 	// We are concatenating all the geometry into one big vertex/index buffer.  So
 	// define the regions in the buffer each submesh covers.
@@ -1186,6 +1196,8 @@ void SkinnedMeshApp::BuildShapeGeometry()
 	UINT sphereVertexOffset = gridVertexOffset + (UINT)grid.Vertices.size();
 	UINT cylinderVertexOffset = sphereVertexOffset + (UINT)sphere.Vertices.size();
     UINT quadVertexOffset = cylinderVertexOffset + (UINT)cylinder.Vertices.size();
+    UINT debug_SSAOVertexOffset = quadVertexOffset + (UINT)quad.Vertices.size();
+    UINT debug_SSGIVertexOffset = debug_SSAOVertexOffset + (UINT)debug_SSAO.Vertices.size();
 
 	// Cache the starting index for each object in the concatenated index buffer.
 	UINT boxIndexOffset = 0;
@@ -1193,6 +1205,8 @@ void SkinnedMeshApp::BuildShapeGeometry()
 	UINT sphereIndexOffset = gridIndexOffset + (UINT)grid.Indices32.size();
 	UINT cylinderIndexOffset = sphereIndexOffset + (UINT)sphere.Indices32.size();
     UINT quadIndexOffset = cylinderIndexOffset + (UINT)cylinder.Indices32.size();
+    UINT debug_SSAOIndexOffset = quadIndexOffset + (UINT)quad.Indices32.size();
+    UINT debug_SSGIIndexOffset = debug_SSAOIndexOffset + (UINT)debug_SSAO.Indices32.size();
 
 	SubmeshGeometry boxSubmesh;
 	boxSubmesh.IndexCount = (UINT)box.Indices32.size();
@@ -1219,6 +1233,15 @@ void SkinnedMeshApp::BuildShapeGeometry()
     quadSubmesh.StartIndexLocation = quadIndexOffset;
     quadSubmesh.BaseVertexLocation = quadVertexOffset;
 
+    SubmeshGeometry debug_SSAOSubmesh;
+    debug_SSAOSubmesh.IndexCount = (UINT)debug_SSAO.Indices32.size();
+    debug_SSAOSubmesh.StartIndexLocation = debug_SSAOIndexOffset;
+    debug_SSAOSubmesh.BaseVertexLocation = debug_SSAOVertexOffset;
+
+    SubmeshGeometry debug_SSGISubmesh;
+    debug_SSGISubmesh.IndexCount = (UINT)debug_SSGI.Indices32.size();
+    debug_SSGISubmesh.StartIndexLocation = debug_SSGIIndexOffset;
+    debug_SSGISubmesh.BaseVertexLocation = debug_SSGIVertexOffset;
 	//
 	// Extract the vertex elements we are interested in and pack the
 	// vertices of all the meshes into one vertex buffer.
@@ -1229,7 +1252,9 @@ void SkinnedMeshApp::BuildShapeGeometry()
 		grid.Vertices.size() +
 		sphere.Vertices.size() +
 		cylinder.Vertices.size() + 
-        quad.Vertices.size();
+        quad.Vertices.size()+
+        debug_SSAO.Vertices.size() +
+        debug_SSGI.Vertices.size();
 
 	std::vector<Vertex> vertices(totalVertexCount);
 
@@ -1273,13 +1298,28 @@ void SkinnedMeshApp::BuildShapeGeometry()
         vertices[k].TexC = quad.Vertices[i].TexC;
         vertices[k].TangentU = quad.Vertices[i].TangentU;
     }
-
+    for (int i = 0; i < debug_SSAO.Vertices.size(); ++i, ++k)
+    {
+        vertices[k].Pos = debug_SSAO.Vertices[i].Position;
+        vertices[k].Normal = debug_SSAO.Vertices[i].Normal;
+        vertices[k].TexC = debug_SSAO.Vertices[i].TexC;
+        vertices[k].TangentU = debug_SSAO.Vertices[i].TangentU;
+    }
+    for (int i = 0; i < debug_SSGI.Vertices.size(); ++i, ++k)
+    {
+        vertices[k].Pos = debug_SSGI.Vertices[i].Position;
+        vertices[k].Normal = debug_SSGI.Vertices[i].Normal;
+        vertices[k].TexC = debug_SSGI.Vertices[i].TexC;
+        vertices[k].TangentU = debug_SSGI.Vertices[i].TangentU;
+    }
 	std::vector<std::uint16_t> indices;
 	indices.insert(indices.end(), std::begin(box.GetIndices16()), std::end(box.GetIndices16()));
 	indices.insert(indices.end(), std::begin(grid.GetIndices16()), std::end(grid.GetIndices16()));
 	indices.insert(indices.end(), std::begin(sphere.GetIndices16()), std::end(sphere.GetIndices16()));
 	indices.insert(indices.end(), std::begin(cylinder.GetIndices16()), std::end(cylinder.GetIndices16()));
     indices.insert(indices.end(), std::begin(quad.GetIndices16()), std::end(quad.GetIndices16()));
+    indices.insert(indices.end(), std::begin(debug_SSAO.GetIndices16()), std::end(debug_SSAO.GetIndices16()));
+    indices.insert(indices.end(), std::begin(debug_SSGI.GetIndices16()), std::end(debug_SSGI.GetIndices16()));
 
     const UINT vbByteSize = (UINT)vertices.size() * sizeof(Vertex);
     const UINT ibByteSize = (UINT)indices.size()  * sizeof(std::uint16_t);
@@ -1309,6 +1349,8 @@ void SkinnedMeshApp::BuildShapeGeometry()
 	geo->DrawArgs["sphere"] = sphereSubmesh;
 	geo->DrawArgs["cylinder"] = cylinderSubmesh;
     geo->DrawArgs["quad"] = quadSubmesh;
+    geo->DrawArgs["debug_SSAO"] = debug_SSAOSubmesh;
+    geo->DrawArgs["debug_SSGI"] = debug_SSGISubmesh;
 
 	mGeometries[geo->Name] = std::move(geo);
 }
@@ -1470,6 +1512,21 @@ void SkinnedMeshApp::BuildPSOs()
         mShaders["debugPS"]->GetBufferSize()
     };
     ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&debugPsoDesc, IID_PPV_ARGS(&mPSOs["debug"])));
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC SSAOdebugPsoDesc = opaquePsoDesc;
+    SSAOdebugPsoDesc.pRootSignature = mRootSignature.Get();
+    SSAOdebugPsoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    SSAOdebugPsoDesc.VS =
+    {
+        reinterpret_cast<BYTE*>(mShaders["debugVS"]->GetBufferPointer()),
+        mShaders["debugVS"]->GetBufferSize()
+    };
+    SSAOdebugPsoDesc.PS =
+    {
+        reinterpret_cast<BYTE*>(mShaders["debug_SSAO_PS"]->GetBufferPointer()),
+        mShaders["debug_SSAO_PS"]->GetBufferSize()
+    };
+    ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&SSAOdebugPsoDesc, IID_PPV_ARGS(&mPSOs["SSAO_debug"])));
     //
     // PSO for Icon layer.
     //
@@ -1645,7 +1702,7 @@ void SkinnedMeshApp::BuildMaterials()
 	bricks0->MatCBIndex = 0;
 	bricks0->DiffuseSrvHeapIndex = 0;
 	bricks0->NormalSrvHeapIndex = 1;
-	bricks0->DiffuseAlbedo = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
+	bricks0->DiffuseAlbedo = XMFLOAT4(0.0f, 0.6f, 0.1f, 1.0f);
     bricks0->FresnelR0 = XMFLOAT3(0.1f, 0.1f, 0.1f);
     bricks0->Roughness = 0.3f;
  
@@ -1663,7 +1720,7 @@ void SkinnedMeshApp::BuildMaterials()
 	mirror0->MatCBIndex = 2;
 	mirror0->DiffuseSrvHeapIndex = 4;
 	mirror0->NormalSrvHeapIndex = 5;
-	mirror0->DiffuseAlbedo = XMFLOAT4(0.0f, 0.0f, 0.0f, 1.0f);
+	mirror0->DiffuseAlbedo = XMFLOAT4(0.5f, 0.0f, 0.0f, 1.0f);
 	mirror0->FresnelR0 = XMFLOAT3(0.98f, 0.97f, 0.95f);
 	mirror0->Roughness = 0.1f;
 
@@ -1721,9 +1778,9 @@ void SkinnedMeshApp::BuildRenderItems()
     quadRitem->Mat = mMaterials["bricks0"].get();
     quadRitem->Geo = mGeometries["shapeGeo"].get();
     quadRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-    quadRitem->IndexCount = quadRitem->Geo->DrawArgs["quad"].IndexCount;
-    quadRitem->StartIndexLocation = quadRitem->Geo->DrawArgs["quad"].StartIndexLocation;
-    quadRitem->BaseVertexLocation = quadRitem->Geo->DrawArgs["quad"].BaseVertexLocation;
+    quadRitem->IndexCount = quadRitem->Geo->DrawArgs["debug_SSGI"].IndexCount;
+    quadRitem->StartIndexLocation = quadRitem->Geo->DrawArgs["debug_SSGI"].StartIndexLocation;
+    quadRitem->BaseVertexLocation = quadRitem->Geo->DrawArgs["debug_SSGI"].BaseVertexLocation;
 
     mRitemLayer[(int)RenderLayer::Debug].push_back(quadRitem.get());
     mAllRitems.push_back(std::move(quadRitem));
@@ -1731,7 +1788,7 @@ void SkinnedMeshApp::BuildRenderItems()
     
 
 	auto boxRitem = std::make_unique<RenderItem>();
-	XMStoreFloat4x4(&boxRitem->World, XMMatrixScaling(2.0f, 1.0f, 2.0f)*XMMatrixTranslation(0.0f, 0.5f, 0.0f));
+	XMStoreFloat4x4(&boxRitem->World, XMMatrixScaling(2.0f, 4.0f, 2.0f)*XMMatrixTranslation(5.0f, 3.5f, -8.3f));
 	XMStoreFloat4x4(&boxRitem->TexTransform, XMMatrixScaling(1.0f, 1.0f, 1.0f));
 	boxRitem->ObjCBIndex = 2;
 	boxRitem->Mat = mMaterials["bricks0"].get();
@@ -1771,6 +1828,20 @@ void SkinnedMeshApp::BuildRenderItems()
 
     mRitemLayer[(int)RenderLayer::Icon].push_back(iconRitem.get());
     mAllRitems.push_back(std::move(iconRitem));
+
+    auto debug_SSAORitem = std::make_unique<RenderItem>();
+    debug_SSAORitem->World = MathHelper::Identity4x4();
+    debug_SSAORitem->TexTransform = MathHelper::Identity4x4();
+    debug_SSAORitem->ObjCBIndex = 5;
+    debug_SSAORitem->Mat = mMaterials["bricks0"].get();
+    debug_SSAORitem->Geo = mGeometries["shapeGeo"].get();
+    debug_SSAORitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+    debug_SSAORitem->IndexCount = debug_SSAORitem->Geo->DrawArgs["debug_SSAO"].IndexCount;
+    debug_SSAORitem->StartIndexLocation = debug_SSAORitem->Geo->DrawArgs["debug_SSAO"].StartIndexLocation;
+    debug_SSAORitem->BaseVertexLocation = debug_SSAORitem->Geo->DrawArgs["debug_SSAO"].BaseVertexLocation;
+
+    mRitemLayer[(int)RenderLayer::SSAO_debug].push_back(debug_SSAORitem.get());
+    mAllRitems.push_back(std::move(debug_SSAORitem));
 
 	XMMATRIX brickTexTransform = XMMatrixScaling(1.5f, 2.0f, 1.0f);
 	UINT objCBIndex = 5;
