@@ -79,7 +79,10 @@ struct RenderItem
 	
 	// Only applicable to skinned render-items.
     UINT SkinnedCBIndex = -1;
-	
+
+    CD3DX12_CPU_DESCRIPTOR_HANDLE mhSkyCubeMapCpuSrv;
+    CD3DX12_GPU_DESCRIPTOR_HANDLE mhSkyCubeMapGpuSrv;
+
     // nullptr if this render-item is not animated by skinned mesh.
     SkinnedModelInstance* SkinnedModelInst = nullptr;
 };
@@ -433,7 +436,14 @@ void SkinnedMeshApp::Draw(const GameTimer& gt)
 	//
 	// 
 	
+
     mCommandList->SetGraphicsRootSignature(mSsaoRootSignature.Get());
+    mSsao->UpdateHiZ(mCommandList.Get(), mDepthStencilBuffer.Get());
+
+    CD3DX12_GPU_DESCRIPTOR_HANDLE skyTexDescriptor(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+    skyTexDescriptor.Offset(mSkyTexHeapIndex, mCbvSrvUavDescriptorSize);
+    mSsao->GetSkyCubeMap(skyTexDescriptor);
+
     mSsao->ComputeSsao(mCommandList.Get(), mCurrFrameResource, 2);
 	
 	//
@@ -477,8 +487,8 @@ void SkinnedMeshApp::Draw(const GameTimer& gt)
     // If we wanted to use "local" cube maps, we would have to change them per-object, or dynamically
     // index into an array of cube maps.
 
-    CD3DX12_GPU_DESCRIPTOR_HANDLE skyTexDescriptor(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
-    skyTexDescriptor.Offset(mSkyTexHeapIndex, mCbvSrvUavDescriptorSize);
+    //CD3DX12_GPU_DESCRIPTOR_HANDLE skyTexDescriptor(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+    //skyTexDescriptor.Offset(mSkyTexHeapIndex, mCbvSrvUavDescriptorSize);
     mCommandList->SetGraphicsRootDescriptorTable(4, skyTexDescriptor);
 
     mCommandList->SetPipelineState(mPSOs["opaque"].Get());
@@ -785,6 +795,7 @@ void SkinnedMeshApp::UpdateSsaoCB(const GameTimer& gt)
     SsaoConstants ssaoCB;
 
     XMMATRIX P = mCamera.GetProj();
+    XMMATRIX V = mCamera.GetView(); // ← 获取 view 矩阵
 
     // Transform NDC space [-1,+1]^2 to texture space [0,1]^2
     XMMATRIX T(
@@ -797,6 +808,11 @@ void SkinnedMeshApp::UpdateSsaoCB(const GameTimer& gt)
     ssaoCB.InvProj = mMainPassCB.InvProj;
     XMStoreFloat4x4(&ssaoCB.ProjTex, XMMatrixTranspose(P*T));
 
+    // === 新增：计算并存储 InvView ===
+    XMMATRIX invView = XMMatrixInverse(nullptr, V);
+    XMStoreFloat4x4(&ssaoCB.InvView, XMMatrixTranspose(invView));
+
+    // ==============================
     mSsao->GetOffsetVectors(ssaoCB.OffsetVectors);
 
     auto blurWeights = mSsao->CalcGaussWeights(2.5f);
@@ -929,19 +945,23 @@ void SkinnedMeshApp::BuildRootSignature()
 void SkinnedMeshApp::BuildSsaoRootSignature()
 {
     CD3DX12_DESCRIPTOR_RANGE texTable0;
-    texTable0.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0, 0);
-
+    //texTable0.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0, 0);
+    texTable0.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0, 0);
     CD3DX12_DESCRIPTOR_RANGE texTable1;
-    texTable1.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 3, 0);
+    //texTable1.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 3, 0);
+    texTable1.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 4, 0);
+    CD3DX12_DESCRIPTOR_RANGE texTable2;
+    texTable2.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 5, 0);
 
     // Root parameter can be a table, root descriptor or root constants.
-    CD3DX12_ROOT_PARAMETER slotRootParameter[4];
+    CD3DX12_ROOT_PARAMETER slotRootParameter[5];
 
     // Perfomance TIP: Order from most frequent to least frequent.
     slotRootParameter[0].InitAsConstantBufferView(0);
     slotRootParameter[1].InitAsConstants(1, 1);
     slotRootParameter[2].InitAsDescriptorTable(1, &texTable0, D3D12_SHADER_VISIBILITY_PIXEL);
     slotRootParameter[3].InitAsDescriptorTable(1, &texTable1, D3D12_SHADER_VISIBILITY_PIXEL);
+    slotRootParameter[4].InitAsDescriptorTable(1, &texTable2, D3D12_SHADER_VISIBILITY_PIXEL);
 
     const CD3DX12_STATIC_SAMPLER_DESC pointClamp(
         0, // shaderRegister
@@ -981,7 +1001,7 @@ void SkinnedMeshApp::BuildSsaoRootSignature()
     };
 
     // A root signature is an array of root parameters.
-    CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(4, slotRootParameter,
+    CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(5, slotRootParameter,
         (UINT)staticSamplers.size(), staticSamplers.data(),
         D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
@@ -1066,11 +1086,21 @@ void SkinnedMeshApp::BuildDescriptorHeaps()
 	srvDesc.Format = skyCubeMap->GetDesc().Format;
 	md3dDevice->CreateShaderResourceView(skyCubeMap.Get(), &srvDesc, hDescriptor);
 	
+
+
+        //+ 0	NormalMap
+        //+ 1	DepthMap
+        //+ 2	Alebdo
+        //+ 3   Hiz
+        //+ 4	RandomMap
+        //+ 5   Ambient
+
+
 	mSkyTexHeapIndex = (UINT)tex2DList.size();
     mShadowMapHeapIndex = mSkyTexHeapIndex + 1;
-    mSsaoHeapIndexStart = mShadowMapHeapIndex + 1;
-    mSsaoAmbientMapIndex = mSsaoHeapIndexStart + 4;
-    mNullCubeSrvIndex = mSsaoHeapIndexStart + 5;
+    mSsaoHeapIndexStart = mShadowMapHeapIndex + 1;     
+    mSsaoAmbientMapIndex = mSsaoHeapIndexStart + 6;
+    mNullCubeSrvIndex = mSsaoAmbientMapIndex + 1;    
     mNullTexSrvIndex1 = mNullCubeSrvIndex + 1;
     mNullTexSrvIndex2 = mNullTexSrvIndex1 + 1;
 

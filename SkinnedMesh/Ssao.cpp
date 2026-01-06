@@ -123,20 +123,19 @@ void Ssao::BuildDescriptors(
     mhNormalMapCpuSrv = hCpuSrv.Offset(1, cbvSrvUavDescriptorSize);
     mhDepthMapCpuSrv = hCpuSrv.Offset(1, cbvSrvUavDescriptorSize);
     mhAlbedoMapCpuSrv = hCpuSrv.Offset(1, cbvSrvUavDescriptorSize);
+    mhHiZMapCpuSrv = hCpuSrv.Offset(1, cbvSrvUavDescriptorSize);
     mhRandomVectorMapCpuSrv = hCpuSrv.Offset(1, cbvSrvUavDescriptorSize);
+    
 
     mhAmbientMap0GpuSrv = hGpuSrv;
     mhAmbientMap1GpuSrv = hGpuSrv.Offset(1, cbvSrvUavDescriptorSize);
     mhNormalMapGpuSrv = hGpuSrv.Offset(1, cbvSrvUavDescriptorSize);
     mhDepthMapGpuSrv = hGpuSrv.Offset(1, cbvSrvUavDescriptorSize);
     mhAlbedoMapGpuSrv = hGpuSrv.Offset(1, cbvSrvUavDescriptorSize);
+    mhHiZMapGpuSrv = hGpuSrv.Offset(1, cbvSrvUavDescriptorSize);
     mhRandomVectorMapGpuSrv = hGpuSrv.Offset(1, cbvSrvUavDescriptorSize);
+    
 
-   /* mhNormalMapCpuRtv = hCpuRtv;
-    mhAlbedoMapCpuRtv = hCpuRtv.Offset(1, rtvDescriptorSize);
-    mhAmbientMap0CpuRtv = hCpuRtv.Offset(1, rtvDescriptorSize);
-    mhAmbientMap1CpuRtv = hCpuRtv.Offset(1, rtvDescriptorSize);
-    */
     // ========== 修正 RTV 句柄赋值逻辑 ==========
     CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandleCopy = hCpuRtv;
     mhNormalMapCpuRtv = rtvHandleCopy;
@@ -169,13 +168,22 @@ void Ssao::RebuildDescriptors(ID3D12Resource* depthStencilBuffer)
     srvDesc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
     md3dDevice->CreateShaderResourceView(depthStencilBuffer, &srvDesc, mhDepthMapCpuSrv);
 
+    srvDesc.Texture2D.MipLevels = 1;
+
     srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     md3dDevice->CreateShaderResourceView(mRandomVectorMap.Get(), &srvDesc, mhRandomVectorMapCpuSrv);
+   
+    // >>>>>>>>>>> 新增：HiZ Map SRV <<<<<<<<<<<
+    srvDesc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; 
+    srvDesc.Texture2D.MipLevels = -1;       // -1 表示使用全部 mip levels（即使你只生成 level 0）
+    md3dDevice->CreateShaderResourceView(mHiZMap.Get(), &srvDesc, mhHiZMapCpuSrv);
+    // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
     srvDesc.Format = AmbientMapFormat;
     md3dDevice->CreateShaderResourceView(mAmbientMap0.Get(), &srvDesc, mhAmbientMap0CpuSrv);
     md3dDevice->CreateShaderResourceView(mAmbientMap1.Get(), &srvDesc, mhAmbientMap1CpuSrv);
-
+    
+   
     D3D12_RENDER_TARGET_VIEW_DESC rtvDesc = {};
     rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
     rtvDesc.Format = NormalMapFormat;
@@ -188,6 +196,8 @@ void Ssao::RebuildDescriptors(ID3D12Resource* depthStencilBuffer)
     rtvDesc.Format = AmbientMapFormat;
     md3dDevice->CreateRenderTargetView(mAmbientMap0.Get(), &rtvDesc, mhAmbientMap0CpuRtv);
     md3dDevice->CreateRenderTargetView(mAmbientMap1.Get(), &rtvDesc, mhAmbientMap1CpuRtv);
+
+
 }
 
 void Ssao::SetPSOs(ID3D12PipelineState* ssaoPso, ID3D12PipelineState* ssaoBlurPso)
@@ -248,6 +258,10 @@ void Ssao::ComputeSsao(
     // Bind the random vector map.
     cmdList->SetGraphicsRootDescriptorTable(3, mhRandomVectorMapGpuSrv);
 
+    //Bind the Default Cube Map
+    cmdList->SetGraphicsRootDescriptorTable(4, mhSkyCubeMapGpuSrv);
+
+
     cmdList->SetPipelineState(mSsaoPso);
 
 	// Draw fullscreen quad.
@@ -260,7 +274,7 @@ void Ssao::ComputeSsao(
     cmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(mAmbientMap0.Get(),
         D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_GENERIC_READ));
 
-   BlurAmbientMap(cmdList, currFrame, blurCount);
+    BlurAmbientMap(cmdList, currFrame, blurCount);
 }
  
 void Ssao::BlurAmbientMap(ID3D12GraphicsCommandList* cmdList, FrameResource* currFrame, int blurCount)
@@ -334,6 +348,7 @@ void Ssao::BuildResources()
     mAlbedoMap = nullptr;
     mAmbientMap0 = nullptr;
     mAmbientMap1 = nullptr;
+    mHiZMap = nullptr;
 
     D3D12_RESOURCE_DESC texDesc;
     ZeroMemory(&texDesc, sizeof(D3D12_RESOURCE_DESC));
@@ -391,6 +406,39 @@ void Ssao::BuildResources()
         D3D12_RESOURCE_STATE_GENERIC_READ,
         &optClear,
         IID_PPV_ARGS(&mAmbientMap1)));
+
+    // --- 新增：HiZ Map (Mipmapped Depth Buffer) ---
+    
+        D3D12_RESOURCE_DESC hizDesc = {};
+        hizDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        hizDesc.Alignment = 0;
+        hizDesc.Width = mRenderTargetWidth;
+        hizDesc.Height = mRenderTargetHeight;
+        hizDesc.DepthOrArraySize = 1;
+
+        // 替换 std::max 为三元表达式
+        int maxDim = (mRenderTargetWidth > mRenderTargetHeight) ? mRenderTargetWidth : mRenderTargetHeight;
+        hizDesc.MipLevels = static_cast<UINT16>(floor(log2f(static_cast<float>(maxDim))) + 1);
+
+        hizDesc.Format = DXGI_FORMAT_R24G8_TYPELESS; // 必须 TYPELESS 才能同时做 DSV 和 SRV
+        hizDesc.SampleDesc.Count = 1;
+        hizDesc.SampleDesc.Quality = 0;
+        hizDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        hizDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL; // 允许作为深度缓冲写入
+
+        D3D12_CLEAR_VALUE hizOptClear = {};
+        hizOptClear.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        hizOptClear.DepthStencil.Depth = 1.0f;
+        hizOptClear.DepthStencil.Stencil = 0;
+
+        ThrowIfFailed(md3dDevice->CreateCommittedResource(
+            &CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+            D3D12_HEAP_FLAG_NONE,
+            &hizDesc,
+            D3D12_RESOURCE_STATE_DEPTH_WRITE,
+            &hizOptClear,
+            IID_PPV_ARGS(&mHiZMap)));
+    
 }
 
 void Ssao::BuildRandomVectorTexture(ID3D12GraphicsCommandList* cmdList)
@@ -505,3 +553,36 @@ void Ssao::BuildOffsetVectors()
 	}
 }
 
+void Ssao::UpdateHiZ(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* mainDepthBuffer)
+{
+    // 1. 把主深度缓冲转为 COPY_SOURCE
+    cmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
+        mainDepthBuffer,
+        D3D12_RESOURCE_STATE_DEPTH_WRITE,
+        D3D12_RESOURCE_STATE_COPY_SOURCE));
+
+    // 2. 把 HiZ 转为 COPY_DEST（无论它之前是什么状态）
+    cmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
+        mHiZMap.Get(),
+        D3D12_RESOURCE_STATE_DEPTH_WRITE, // 或 GENERIC_READ，但不能假设是 PSO
+        D3D12_RESOURCE_STATE_COPY_DEST));
+
+    // 3. 执行复制
+    cmdList->CopyTextureRegion(
+        &CD3DX12_TEXTURE_COPY_LOCATION(mHiZMap.Get(), 0),
+        0, 0, 0,
+        &CD3DX12_TEXTURE_COPY_LOCATION(mainDepthBuffer, 0),
+        nullptr);
+
+    // 4. 把主深度缓冲转回 DEPTH_WRITE
+    cmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
+        mainDepthBuffer,
+        D3D12_RESOURCE_STATE_COPY_SOURCE,
+        D3D12_RESOURCE_STATE_DEPTH_WRITE));
+
+    // 5. 把 HiZ 转为 PIXEL_SHADER_RESOURCE（供 SSAO 读取）
+    cmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
+        mHiZMap.Get(),
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+}

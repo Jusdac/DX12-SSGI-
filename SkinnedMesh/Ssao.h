@@ -55,11 +55,11 @@ public:
 
     void RebuildDescriptors(ID3D12Resource* depthStencilBuffer);
 
+    void UpdateHiZ(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* mainDepthBuffer);
+
     void SetPSOs(ID3D12PipelineState* ssaoPso, ID3D12PipelineState* ssaoBlurPso);
 
-	///<summary>
-	/// Call when the backbuffer is resized.  
-	///</summary>
+
 	void OnResize(UINT newWidth, UINT newHeight);
   
     ///<summary>
@@ -72,7 +72,8 @@ public:
         ID3D12GraphicsCommandList* cmdList, 
         FrameResource* currFrame, 
         int blurCount);
- 
+    void SetSkyCubeMap(ID3D12Resource* skyCube) { mSkyCubeMap = skyCube; }
+    void GetSkyCubeMap(CD3DX12_GPU_DESCRIPTOR_HANDLE skyCube) { mhSkyCubeMapGpuSrv = skyCube; }
 
 private:
  
@@ -107,6 +108,9 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> mAmbientMap0;
     Microsoft::WRL::ComPtr<ID3D12Resource> mAmbientMap1;
 
+    Microsoft::WRL::ComPtr<ID3D12Resource> mHiZMap;
+    ID3D12Resource* mSkyCubeMap = nullptr; // 不拥有所有权，只引用
+
     CD3DX12_CPU_DESCRIPTOR_HANDLE mhNormalMapCpuSrv;
     CD3DX12_GPU_DESCRIPTOR_HANDLE mhNormalMapGpuSrv;
     CD3DX12_CPU_DESCRIPTOR_HANDLE mhNormalMapCpuRtv;
@@ -129,6 +133,12 @@ private:
     CD3DX12_CPU_DESCRIPTOR_HANDLE mhAmbientMap1CpuSrv;
     CD3DX12_GPU_DESCRIPTOR_HANDLE mhAmbientMap1GpuSrv;
     CD3DX12_CPU_DESCRIPTOR_HANDLE mhAmbientMap1CpuRtv;
+
+    CD3DX12_CPU_DESCRIPTOR_HANDLE mhHiZMapCpuSrv;
+    CD3DX12_GPU_DESCRIPTOR_HANDLE mhHiZMapGpuSrv;
+
+    CD3DX12_CPU_DESCRIPTOR_HANDLE mhSkyCubeMapCpuSrv;
+    CD3DX12_GPU_DESCRIPTOR_HANDLE mhSkyCubeMapGpuSrv;
 
 	UINT mRenderTargetWidth;
 	UINT mRenderTargetHeight;

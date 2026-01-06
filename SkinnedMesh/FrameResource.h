@@ -65,6 +65,7 @@ struct SsaoConstants
     float OcclusionFadeStart = 0.2f;
     float OcclusionFadeEnd = 2.0f;
     float SurfaceEpsilon = 0.05f;
+    DirectX::XMFLOAT4X4 InvView;
 };
 
 struct MaterialData

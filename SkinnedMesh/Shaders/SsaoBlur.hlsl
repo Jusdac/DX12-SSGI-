@@ -40,12 +40,16 @@ cbuffer cbRootConstants : register(b1)
 //Texture2D gDepthMap  : register(t1);
 //Texture2D gInputMap  : register(t2);
 
+//Texture2D gNormalMap : register(t0);
+//Texture2D gDepthMap : register(t1);
+//Texture2D gAlbedoMap : register(t2);
+//Texture2D gInputMap : register(t3);
 Texture2D gNormalMap : register(t0);
 Texture2D gDepthMap : register(t1);
 Texture2D gAlbedoMap : register(t2);
-Texture2D gInputMap : register(t3);
+Texture2D gHizMap : register(t3);
+Texture2D gInputMap : register(t4);
 
- 
 SamplerState gsamPointClamp : register(s0);
 SamplerState gsamLinearClamp : register(s1);
 SamplerState gsamDepthMap : register(s2);
